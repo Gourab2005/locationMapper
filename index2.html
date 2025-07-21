@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Zoomable GPS Mapping</title>
+  <style>
+    body {
+      margin: 0;
+      font-family: sans-serif;
+      overflow: hidden;
+    }
+
+    #controls {
+      position: fixed;
+      top: 10px;
+      left: 10px;
+      z-index: 2;
+      background: rgba(255, 255, 255, 0.9);
+      padding: 10px;
+      border-radius: 8px;
+      box-shadow: 0 0 10px rgba(0,0,0,0.2);
+    }
+
+    button {
+      padding: 8px 12px;
+      margin: 5px;
+      font-size: 14px;
+      cursor: pointer;
+    }
+
+    #zoomControls {
+      margin-top: 10px;
+    }
+
+    #status {
+      margin-top: 8px;
+      font-size: 14px;
+      color: #333;
+    }
+
+    canvas {
+      display: block;
+    }
+  </style>
+</head>
+<body>
+
+  <div id="controls">
+    <button id="startMapping">🗺️ Do Mapping</button>
+    <button id="startWalkThrough">🚶 Walk Through</button>
+
+    <div id="zoomControls">
+      <button id="zoomIn">➕ Zoom In</button>
+      <button id="zoomOut">➖ Zoom Out</button>
+    </div>
+
+    <div id="status">Status: Idle</div>
+  </div>
+
+  <canvas id="mapCanvas"></canvas>
+
+  <script>
+    const canvas = document.getElementById('mapCanvas');
+    const ctx = canvas.getContext('2d');
+    const statusEl = document.getElementById('status');
+
+    let watchId;
+    let recordedPoints = [];
+    let scaleFactor = 1.0; // for zoom
+    let baseScaled = []; // store pre-scaled coords
+
+    function resizeCanvas() {
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+    }
+    window.addEventListener('resize', () => {
+      resizeCanvas();
+      redraw(); // re-render on resize
+    });
+    resizeCanvas();
+
+    function drawPoint(x, y, color = "blue", radius = 5) {
+      ctx.beginPath();
+      ctx.arc(x, y, radius, 0, 2 * Math.PI);
+      ctx.fillStyle = color;
+      ctx.fill();
+    }
+
+    function drawPathLine(points, color = "blue") {
+      if (points.length < 2) return;
+      ctx.beginPath();
+      ctx.moveTo(points[0].x, points[0].y);
+      for (let i = 1; i < points.length; i++) {
+        ctx.lineTo(points[i].x, points[i].y);
+      }
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
+
+    function scaleCoordinates(coords, width, height, padding = 40) {
+      const lats = coords.map(c => c.latitude);
+      const lons = coords.map(c => c.longitude);
+      const minLat = Math.min(...lats);
+      const maxLat = Math.max(...lats);
+      const minLon = Math.min(...lons);
+      const maxLon = Math.max(...lons);
+
+      const latRange = maxLat - minLat || 0.0001;
+      const lonRange = maxLon - minLon || 0.0001;
+
+      return coords.map(c => ({
+        x: padding + ((c.longitude - minLon) / lonRange) * (width - 2 * padding),
+        y: height - (padding + ((c.latitude - minLat) / latRange) * (height - 2 * padding))
+      }));
+    }
+
+    function redraw(currentLive = null) {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      const zoomed = baseScaled.map(p => ({
+        x: p.x * scaleFactor,
+        y: p.y * scaleFactor
+      }));
+
+      drawPathLine(zoomed);
+      zoomed.forEach(p => drawPoint(p.x, p.y, "blue", 4));
+
+      if (currentLive) {
+        drawPoint(currentLive.x * scaleFactor, currentLive.y * scaleFactor, "red", 6);
+      }
+    }
+
+    function startMapping() {
+      localStorage.removeItem('mappedCoordinates');
+      recordedPoints = [];
+      scaleFactor = 1.0;
+      statusEl.textContent = "Status: Mapping in progress...";
+
+      if (watchId) navigator.geolocation.clearWatch(watchId);
+
+      watchId = navigator.geolocation.watchPosition(
+        position => {
+          const { latitude, longitude, altitude } = position.coords;
+          const point = { latitude, longitude, altitude: altitude || 0 };
+          recordedPoints.push(point);
+          localStorage.setItem('mappedCoordinates', JSON.stringify(recordedPoints));
+        },
+        error => alert("Location error: " + error.message),
+        {
+          enableHighAccuracy: true,
+          timeout: 5000,
+          maximumAge: 0
+        }
+      );
+    }
+
+    function startWalkThrough() {
+      const stored = localStorage.getItem('mappedCoordinates');
+      if (!stored) {
+        alert("No mapped data found.");
+        return;
+      }
+
+      recordedPoints = JSON.parse(stored);
+      if (recordedPoints.length < 2) {
+        alert("Not enough points mapped.");
+        return;
+      }
+
+      scaleFactor = 1.0;
+      statusEl.textContent = "Status: Walkthrough active. Tracking live...";
+
+      if (watchId) navigator.geolocation.clearWatch(watchId);
+
+      // Precompute base scaling
+      baseScaled = scaleCoordinates(recordedPoints, canvas.width, canvas.height);
+
+      watchId = navigator.geolocation.watchPosition(
+        position => {
+          const { latitude, longitude } = position.coords;
+          const combined = [...recordedPoints, { latitude, longitude }];
+          const allScaled = scaleCoordinates(combined, canvas.width, canvas.height);
+          const livePoint = allScaled[allScaled.length - 1];
+
+          redraw(livePoint);
+        },
+        error => alert("Live tracking error: " + error.message),
+        {
+          enableHighAccuracy: true,
+          timeout: 5000,
+          maximumAge: 0
+        }
+      );
+    }
+
+    document.getElementById('startMapping').addEventListener('click', startMapping);
+    document.getElementById('startWalkThrough').addEventListener('click', startWalkThrough);
+
+    document.getElementById('zoomIn').addEventListener('click', () => {
+      scaleFactor *= 1.2;
+      redraw();
+    });
+
+    document.getElementById('zoomOut').addEventListener('click', () => {
+      scaleFactor /= 1.2;
+      redraw();
+    });
+  </script>
+</body>
+</html>
