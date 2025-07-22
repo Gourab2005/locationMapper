@@ -1,0 +1,570 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Interactive Custom Canvas Map Tracker</title>
+    <style>
+        body {
+            font-family: sans-serif;
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            background-color: #f4f4f4;
+        }
+        h1 {
+            color: #333;
+            margin-bottom: 20px;
+        }
+        #mapCanvas {
+            border: 2px solid #333;
+            background-color: #fff;
+            border-radius: 8px;
+            box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+            width: 100%;
+            max-width: 900px;
+            height: 600px; /* Fixed height for the canvas */
+            cursor: grab; /* Indicate it's draggable */
+        }
+        #mapCanvas.dragging {
+            cursor: grabbing; /* Indicate it's being dragged */
+        }
+        .controls {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            margin-bottom: 20px;
+            justify-content: center;
+            width: 100%;
+            max-width: 900px;
+        }
+        .controls button, .controls input {
+            padding: 10px 15px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 16px;
+            transition: background-color 0.3s ease;
+        }
+        .controls button {
+            background-color: #007bff;
+            color: white;
+        }
+        .controls button:hover:not(:disabled) {
+            background-color: #0056b3;
+        }
+        .controls button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+        .controls input[type="text"] {
+            border: 1px solid #ccc;
+            flex-grow: 1;
+            min-width: 150px;
+        }
+        #message {
+            margin-top: 10px;
+            color: #333;
+            font-weight: bold;
+            text-align: center;
+        }
+    </style>
+</head>
+<body>
+    <h1>Interactive Custom Canvas Map Tracker</h1>
+    <canvas id="mapCanvas"></canvas>
+    <div class="controls">
+        <button id="startMappingBtn">Start Mapping</button>
+        <button id="stopTrackingBtn" disabled>Stop Tracking</button>
+        <input type="text" id="labelInput" placeholder="Enter label" disabled>
+        <button id="addLabelBtn" disabled>Add Label</button>
+        <button id="saveMapBtn" disabled>Save Map</button>
+        <button id="loadMapBtn">Load Saved Map</button>
+        <button id="startWalkBtn">Start Walk on Map</button>
+        <button id="clearMapBtn">Clear Map</button>
+        <button id="zoomInBtn">Zoom In</button>
+        <button id="zoomOutBtn">Zoom Out</button>
+    </div>
+    <div id="message"></div>
+
+    <script>
+        const canvas = document.getElementById('mapCanvas');
+        const ctx = canvas.getContext('2d');
+
+        let mappedPoints = []; // Stores {lat, lng, label?}
+        let watchId = null;
+        let isMapping = false;
+        let isWalking = false;
+
+        // Reference point for relative drawing (first point of the path)
+        let originLat = null;
+        let originLng = null;
+
+        // Scaling and offset for canvas drawing
+        let scale = 1; // Pixels per meter
+        let offsetX = 0;
+        let offsetY = 0;
+
+        // Current position marker for 'Walk on Map' mode
+        let currentPositionMarker = null;
+
+        // Dragging variables
+        let isDragging = false;
+        let lastMouseX = 0;
+        let lastMouseY = 0;
+
+        const startMappingBtn = document.getElementById('startMappingBtn');
+        const stopTrackingBtn = document.getElementById('stopTrackingBtn');
+        const labelInput = document.getElementById('labelInput');
+        const addLabelBtn = document.getElementById('addLabelBtn');
+        const saveMapBtn = document.getElementById('saveMapBtn');
+        const loadMapBtn = document.getElementById('loadMapBtn');
+        const startWalkBtn = document.getElementById('startWalkBtn');
+        const clearMapBtn = document.getElementById('clearMapBtn');
+        const zoomInBtn = document.getElementById('zoomInBtn');
+        const zoomOutBtn = document.getElementById('zoomOutBtn');
+        const messageDiv = document.getElementById('message');
+
+        // Constants for converting lat/lng differences to meters (approximate for small areas)
+        const LAT_TO_METER = 111139; // Approx meters per degree latitude
+        const LNG_TO_METER_AT_EQUATOR = 111320; // Approx meters per degree longitude at equator
+
+        const ZOOM_FACTOR = 1.1; // How much to zoom in/out each step
+        const MIN_SCALE = 0.01; // Minimum zoom level
+        const MAX_SCALE = 100;  // Maximum zoom level
+
+        // Function to convert lat/lng to relative x, y on canvas
+        function latLngToCanvasXY(lat, lng) {
+            if (originLat === null || originLng === null) {
+                // If origin is not set, return center of canvas as a fallback
+                return { x: canvas.width / 2, y: canvas.height / 2 };
+            }
+
+            // Calculate meters difference from origin
+            const deltaLatMeters = (lat - originLat) * LAT_TO_METER;
+            const deltaLngMeters = (lng - originLng) * (LNG_TO_METER_AT_EQUATOR * Math.cos(originLat * Math.PI / 180));
+
+            // Apply scale and offset to get canvas coordinates
+            // Y-axis is inverted in canvas (0,0 is top-left, positive Y is down)
+            // So, positive latitude (North) should go up (negative Y)
+            // Positive longitude (East) should go right (positive X)
+            const canvasX = offsetX + deltaLngMeters * scale;
+            const canvasY = offsetY - deltaLatMeters * scale; // Invert Y for map-like display
+
+            return { x: canvasX, y: canvasY };
+        }
+
+        // Function to draw the path and markers on the canvas
+        function drawMap() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height); // Clear canvas
+
+            if (mappedPoints.length === 0 && !currentPositionMarker) return;
+
+            // Draw path
+            if (mappedPoints.length > 0) {
+                ctx.beginPath();
+                ctx.strokeStyle = 'blue';
+                ctx.lineWidth = 3;
+                mappedPoints.forEach((point, index) => {
+                    const { x, y } = latLngToCanvasXY(point.lat, point.lng);
+                    if (index === 0) {
+                        ctx.moveTo(x, y);
+                    } else {
+                        ctx.lineTo(x, y);
+                    }
+                });
+                ctx.stroke();
+
+                // Draw points and labels
+                mappedPoints.forEach(point => {
+                    const { x, y } = latLngToCanvasXY(point.lat, point.lng);
+
+                    // Draw point
+                    ctx.beginPath();
+                    ctx.arc(x, y, 5, 0, Math.PI * 2);
+                    ctx.fillStyle = 'red';
+                    ctx.fill();
+                    ctx.strokeStyle = 'white';
+                    ctx.lineWidth = 2;
+                    ctx.stroke();
+
+                    // Draw label if exists
+                    if (point.label) {
+                        ctx.fillStyle = 'black';
+                        ctx.font = '14px Arial';
+                        ctx.fillText(point.label, x + 10, y - 10);
+                    }
+                });
+            }
+
+            // Draw current position marker if exists
+            if (currentPositionMarker) {
+                const { x, y } = latLngToCanvasXY(currentPositionMarker.lat, currentPositionMarker.lng);
+                ctx.beginPath();
+                ctx.arc(x, y, 8, 0, Math.PI * 2);
+                ctx.fillStyle = 'green';
+                ctx.fill();
+                ctx.strokeStyle = 'white';
+                ctx.lineWidth = 2;
+                ctx.stroke();
+
+                ctx.fillStyle = 'black';
+                ctx.font = '14px Arial';
+                ctx.fillText('You Are Here', x + 15, y + 5);
+            }
+        }
+
+        // Adjust scale and offset to fit all points on canvas
+        function fitMapToCanvas() {
+            if (mappedPoints.length === 0) {
+                scale = 1;
+                offsetX = canvas.width / 2;
+                offsetY = canvas.height / 2;
+                drawMap();
+                return;
+            }
+
+            let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+
+            // Calculate bounds based on current mapped points
+            mappedPoints.forEach(point => {
+                const { x, y } = latLngToCanvasXY(point.lat, point.lng); // Calculate raw relative coords
+                minX = Math.min(minX, x);
+                maxX = Math.max(maxX, x);
+                minY = Math.min(minY, y);
+                maxY = Math.max(maxY, y);
+            });
+
+            // If walking, include current position in bounds calculation
+            if (isWalking && currentPositionMarker) {
+                const { x, y } = latLngToCanvasXY(currentPositionMarker.lat, currentPositionMarker.lng);
+                minX = Math.min(minX, x);
+                maxX = Math.max(maxX, x);
+                minY = Math.min(minY, y);
+                maxY = Math.max(maxY, y);
+            }
+
+            // Calculate current bounds in meters
+            const mapWidthMeters = (maxX - minX) / scale;
+            const mapHeightMeters = (maxY - minY) / scale;
+
+            // Calculate new scale
+            const padding = 0.1; // 10% padding
+            const scaleX = (canvas.width * (1 - padding)) / mapWidthMeters;
+            const scaleY = (canvas.height * (1 - padding)) / mapHeightMeters;
+            scale = Math.min(scaleX, scaleY);
+
+            if (isNaN(scale) || !isFinite(scale) || scale <= 0) { // Handle cases where mapWidth/HeightMeters is 0 or negative
+                scale = 1; // Default scale if no movement or invalid calculation
+            }
+
+            // Clamp scale within limits
+            scale = Math.max(MIN_SCALE, Math.min(MAX_SCALE, scale));
+
+            // Calculate new offset to center the map
+            // This centers the *content* within the canvas, then applies the scale
+            offsetX = canvas.width / 2 - ((minX + maxX) / 2);
+            offsetY = canvas.height / 2 - ((minY + maxY) / 2);
+
+            drawMap(); // Redraw with new scale and offset
+        }
+
+        // Geolocation success callback
+        function onLocationSuccess(position) {
+            const lat = position.coords.latitude;
+            const lng = position.coords.longitude;
+            const accuracy = position.coords.accuracy; // Accuracy in meters
+
+            if (originLat === null) {
+                originLat = lat;
+                originLng = lng;
+                messageDiv.textContent = `Origin set. Accuracy: ${accuracy.toFixed(2)}m. Start moving!`;
+            }
+
+            if (isMapping) {
+                mappedPoints.push({ lat, lng });
+                messageDiv.textContent = `Mapping: Lat ${lat.toFixed(5)}, Lng ${lng.toFixed(5)}, Accuracy: ${accuracy.toFixed(2)}m`;
+                fitMapToCanvas(); // Adjust view to fit new point
+            } else if (isWalking) {
+                currentPositionMarker = { lat, lng };
+                messageDiv.textContent = `Walking: Lat ${lat.toFixed(5)}, Lng ${lng.toFixed(5)}, Accuracy: ${accuracy.toFixed(2)}m`;
+                drawMap(); // Redraw to update marker position
+            }
+        }
+
+        // Geolocation error callback
+        function onLocationError(error) {
+            let errorMessage = `Geolocation error: ${error.message}`;
+            if (error.code === error.PERMISSION_DENIED) {
+                errorMessage += ". Please enable location services for this site.";
+            } else if (error.code === error.POSITION_UNAVAILABLE) {
+                errorMessage += ". Location information is unavailable.";
+            }
+            // Removed timeout error specific message as timeout is removed
+            messageDiv.textContent = errorMessage;
+            console.error('Geolocation error:', error);
+            stopTracking(); // Stop tracking on error
+        }
+
+        // Start mapping user's movement
+        function startMapping() {
+            if (isMapping || isWalking) return;
+
+            clearCanvasAndData(); // Clear previous state
+            isMapping = true;
+            messageDiv.textContent = 'Starting mapping... Please grant location permission and move around.';
+            if (navigator.geolocation) {
+                watchId = navigator.geolocation.watchPosition(onLocationSuccess, onLocationError, {
+                    enableHighAccuracy: true, // Request highest accuracy
+                    maximumAge: 0             // Always get a fresh position, no cached data
+                    // Timeout option removed
+                });
+            } else {
+                messageDiv.textContent = 'Geolocation is not supported by your browser.';
+                isMapping = false;
+            }
+            updateUI();
+        }
+
+        // Add a label at the current mapped point
+        function addLabel() {
+            if (!isMapping || mappedPoints.length === 0) {
+                messageDiv.textContent = 'Start mapping first or no points recorded yet.';
+                return;
+            }
+
+            const labelText = labelInput.value.trim();
+            if (!labelText) {
+                messageDiv.textContent = 'Please enter a label.';
+                return;
+            }
+
+            const lastPoint = mappedPoints[mappedPoints.length - 1];
+            if (lastPoint) {
+                lastPoint.label = labelText;
+                messageDiv.textContent = `Label "${labelText}" added.`;
+                labelInput.value = ''; // Clear input
+                drawMap(); // Redraw to show new label
+            } else {
+                messageDiv.textContent = 'No points to label yet.';
+            }
+        }
+
+        // Save mapped data to local storage
+        function saveMapData() {
+            if (mappedPoints.length === 0) {
+                messageDiv.textContent = 'No map data to save.';
+                return;
+            }
+            try {
+                const dataToSave = {
+                    points: mappedPoints,
+                    originLat: originLat,
+                    originLng: originLng
+                };
+                localStorage.setItem('customMappedRoute', JSON.stringify(dataToSave));
+                messageDiv.textContent = `Map data (${mappedPoints.length} points) saved successfully!`;
+            } catch (e) {
+                messageDiv.textContent = 'Error saving map data: ' + e.message;
+                console.error('Local storage save error:', e);
+            }
+            updateUI();
+        }
+
+        // Load and display saved map data
+        function loadMapData() {
+            if (isMapping || isWalking) return;
+
+            clearCanvasAndData(); // Clear current state before loading
+
+            try {
+                const savedData = localStorage.getItem('customMappedRoute');
+                if (savedData) {
+                    const parsedData = JSON.parse(savedData);
+                    mappedPoints = parsedData.points || [];
+                    originLat = parsedData.originLat;
+                    originLng = parsedData.originLng;
+
+                    if (mappedPoints.length > 0) {
+                        fitMapToCanvas(); // Adjust view to fit loaded points
+                        messageDiv.textContent = `Map data (${mappedPoints.length} points) loaded successfully!`;
+                    } else {
+                        messageDiv.textContent = 'No points found in saved data.';
+                    }
+                } else {
+                    messageDiv.textContent = 'No saved map data found.';
+                }
+            } catch (e) {
+                messageDiv.textContent = 'Error loading map data: ' + e.message;
+                console.error('Local storage load error:', e);
+            }
+            updateUI();
+        }
+
+        // Start walking on the loaded map
+        function startWalk() {
+            if (isMapping || isWalking) return;
+
+            loadMapData(); // Ensure map data is loaded and displayed
+            if (mappedPoints.length === 0) {
+                messageDiv.textContent = 'No saved map data to walk on. Please map and save first.';
+                return;
+            }
+
+            isWalking = true;
+            messageDiv.textContent = 'Starting walk...';
+            if (navigator.geolocation) {
+                watchId = navigator.geolocation.watchPosition(onLocationSuccess, onLocationError, {
+                    enableHighAccuracy: true, // Request highest accuracy
+                    maximumAge: 0             // Always get a fresh position, no cached data
+                    // Timeout option removed
+                });
+            } else {
+                messageDiv.textContent = 'Geolocation is not supported by your browser.';
+                isWalking = false;
+            }
+            updateUI();
+        }
+
+        // Stop any active tracking (mapping or walking)
+        function stopTracking() {
+            if (watchId !== null) {
+                navigator.geolocation.clearWatch(watchId);
+                watchId = null;
+            }
+            currentPositionMarker = null;
+            isMapping = false;
+            isWalking = false;
+            messageDiv.textContent = 'Tracking stopped.';
+            drawMap(); // Redraw to remove current position marker
+            updateUI();
+        }
+
+        // Clear map and local storage
+        function clearMap() {
+            stopTracking();
+            clearCanvasAndData();
+            localStorage.removeItem('customMappedRoute');
+            messageDiv.textContent = 'Map cleared and saved data removed.';
+            updateUI();
+        }
+
+        // Helper to clear canvas and reset data
+        function clearCanvasAndData() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            mappedPoints = [];
+            originLat = null;
+            originLng = null;
+            scale = 1;
+            offsetX = canvas.width / 2;
+            offsetY = canvas.height / 2;
+            currentPositionMarker = null;
+            drawMap(); // Ensure canvas is truly empty
+        }
+
+        // Function to update UI based on state
+        function updateUI() {
+            startMappingBtn.disabled = isMapping || isWalking;
+            startWalkBtn.disabled = isMapping || isWalking;
+            stopTrackingBtn.disabled = !(isMapping || isWalking);
+            labelInput.disabled = !isMapping;
+            addLabelBtn.disabled = !isMapping;
+            saveMapBtn.disabled = !isMapping && mappedPoints.length === 0;
+            loadMapBtn.disabled = isMapping || isWalking;
+            clearMapBtn.disabled = isMapping || isWalking;
+        }
+
+        // --- Zoom Functionality ---
+        function zoom(zoomFactor, centerX, centerY) {
+            const oldScale = scale;
+            scale *= zoomFactor;
+
+            // Clamp scale within limits
+            scale = Math.max(MIN_SCALE, Math.min(MAX_SCALE, scale));
+
+            // Adjust offset to keep the zoom center fixed
+            offsetX = centerX - ((centerX - offsetX) / oldScale) * scale;
+            offsetY = centerY - ((centerY - offsetY) / oldScale) * scale;
+
+            drawMap();
+        }
+
+        zoomInBtn.addEventListener('click', () => {
+            zoom(ZOOM_FACTOR, canvas.width / 2, canvas.height / 2); // Zoom around canvas center
+        });
+
+        zoomOutBtn.addEventListener('click', () => {
+            zoom(1 / ZOOM_FACTOR, canvas.width / 2, canvas.height / 2); // Zoom around canvas center
+        });
+
+        canvas.addEventListener('wheel', (e) => {
+            e.preventDefault(); // Prevent page scrolling
+            const mouseX = e.clientX - canvas.getBoundingClientRect().left;
+            const mouseY = e.clientY - canvas.getBoundingClientRect().top;
+
+            if (e.deltaY < 0) { // Scroll up = zoom in
+                zoom(ZOOM_FACTOR, mouseX, mouseY);
+            } else { // Scroll down = zoom out
+                zoom(1 / ZOOM_FACTOR, mouseX, mouseY);
+            }
+        });
+
+        // --- Dragging Functionality ---
+        canvas.addEventListener('mousedown', (e) => {
+            isDragging = true;
+            canvas.classList.add('dragging');
+            lastMouseX = e.clientX;
+            lastMouseY = e.clientY;
+        });
+
+        canvas.addEventListener('mousemove', (e) => {
+            if (!isDragging) return;
+
+            const deltaX = e.clientX - lastMouseX;
+            const deltaY = e.clientY - lastMouseY;
+
+            offsetX += deltaX;
+            offsetY += deltaY;
+
+            lastMouseX = e.clientX;
+            lastMouseY = e.clientY;
+
+            drawMap(); // Redraw the map with the new offset
+        });
+
+        canvas.addEventListener('mouseup', () => {
+            isDragging = false;
+            canvas.classList.remove('dragging');
+        });
+
+        canvas.addEventListener('mouseleave', () => {
+            isDragging = false;
+            canvas.classList.remove('dragging');
+        });
+
+        // Initial setup
+        document.addEventListener('DOMContentLoaded', () => {
+            // Set canvas dimensions
+            canvas.width = canvas.offsetWidth;
+            canvas.height = canvas.offsetHeight;
+            offsetX = canvas.width / 2;
+            offsetY = canvas.height / 2;
+
+            updateUI(); // Set initial button states
+            messageDiv.textContent = 'Ready to map! Click "Start Mapping" or "Load Saved Map".';
+        });
+
+        // Event Listeners
+        startMappingBtn.addEventListener('click', startMapping);
+        stopTrackingBtn.addEventListener('click', stopTracking);
+        addLabelBtn.addEventListener('click', addLabel);
+        saveMapBtn.addEventListener('click', saveMapData);
+        loadMapBtn.addEventListener('click', loadMapData);
+        startWalkBtn.addEventListener('click', startWalk);
+        clearMapBtn.addEventListener('click', clearMap);
+    </script>
+</body>
+</html>
