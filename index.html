@@ -1,182 +1,440 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <title>Live GPS Mapping</title>
-  <style>
-    body {
-      margin: 0;
-      font-family: sans-serif;
-      overflow: hidden;
-    }
-    #controls {
-      position: fixed;
-      top: 10px;
-      left: 10px;
-      z-index: 2;
-      background: rgba(255, 255, 255, 0.9);
-      padding: 10px;
-      border-radius: 8px;
-      box-shadow: 0 0 10px rgba(0,0,0,0.2);
-    }
-
-    button {
-      padding: 8px 16px;
-      margin: 5px;
-      font-size: 14px;
-    }
-
-    #status {
-      margin-top: 8px;
-      font-size: 14px;
-      color: #333;
-    }
-
-    canvas {
-      display: block;
-    }
-  </style>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Geolocation Path Mapper</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            text-align: center;
+            margin: 0;
+            padding: 20px;
+            background-color: #f0f0f0;
+        }
+        #container {
+            margin: 0 auto;
+            max-width: 800px;
+        }
+        #map-container {
+            position: relative;
+            margin: 20px auto;
+            border: 2px solid #333;
+            background-color: white;
+        }
+        #map {
+            display: block;
+        }
+        .controls {
+            display: flex;
+            justify-content: center;
+            gap: 10px;
+            margin-bottom: 10px;
+            flex-wrap: wrap;
+        }
+        button {
+            padding: 10px 20px;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 16px;
+        }
+        #start {
+            background-color: #4CAF50;
+        }
+        #stop {
+            background-color: #f44336;
+        }
+        #center {
+            background-color: #2196F3;
+        }
+        #export {
+            background-color: #9C27B0;
+        }
+        .data-display {
+            display: flex;
+            justify-content: space-around;
+            flex-wrap: wrap;
+            margin: 15px 0;
+        }
+        .data-box {
+            background: white;
+            padding: 10px 15px;
+            border-radius: 5px;
+            margin: 5px;
+            min-width: 150px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+        }
+        #status {
+            margin: 15px 0;
+            padding: 10px;
+            background: white;
+            border-radius: 5px;
+            font-weight: bold;
+        }
+        .instructions {
+            text-align: left;
+            background: white;
+            padding: 15px;
+            border-radius: 5px;
+            margin-bottom: 20px;
+        }
+    </style>
 </head>
 <body>
+    <div id="container">
+        <h1>Geolocation Path Mapper</h1>
+        
+        <div class="instructions">
+            <h3>How to use:</h3>
+            <ol>
+                <li>Click "Start Mapping" (grant location permissions if asked)</li>
+                <li>Hold your phone flat with screen facing up</li>
+                <li>Walk normally - your path will be drawn</li>
+                <li>The arrow shows your current direction</li>
+                <li>Click "Center Map" to recenter on your position</li>
+                <li>Click "Stop Mapping" when finished</li>
+                <li>Use "Export Path" to save your route as JSON</li>
+            </ol>
+            <p><strong>Note:</strong> For best results, use outdoors with GPS signal.</p>
+        </div>
+        
+        <div class="controls">
+            <button id="start">Start Mapping</button>
+            <button id="stop" disabled>Stop Mapping</button>
+            <button id="center" disabled>Center Map</button>
+            <button id="export" disabled>Export Path</button>
+        </div>
+        
+        <div class="data-display">
+            <div class="data-box">
+                <div>Latitude:</div>
+                <div id="latitude">-</div>
+            </div>
+            <div class="data-box">
+                <div>Longitude:</div>
+                <div id="longitude">-</div>
+            </div>
+            <div class="data-box">
+                <div>Accuracy:</div>
+                <div id="accuracy">-</div>
+            </div>
+            <div class="data-box">
+                <div>Heading:</div>
+                <div id="heading">-</div>
+            </div>
+            <div class="data-box">
+                <div>Speed:</div>
+                <div id="speed">-</div>
+            </div>
+        </div>
+        
+        <div id="map-container">
+            <canvas id="map" width="600" height="600"></canvas>
+        </div>
+        
+        <div id="status">Ready to start mapping</div>
+    </div>
 
-  <div id="controls">
-    <button id="startMapping">🗺️ Do Mapping</button>
-    <button id="startWalkThrough">🚶 Walk Through</button>
-    <div id="status">Status: Idle</div>
-  </div>
+    <script>
+        // DOM elements
+        const mapCanvas = document.getElementById("map");
+        const ctx = mapCanvas.getContext("2d");
+        const startBtn = document.getElementById("start");
+        const stopBtn = document.getElementById("stop");
+        const centerBtn = document.getElementById("center");
+        const exportBtn = document.getElementById("export");
+        const statusDiv = document.getElementById("status");
+        const latitudeDisplay = document.getElementById("latitude");
+        const longitudeDisplay = document.getElementById("longitude");
+        const accuracyDisplay = document.getElementById("accuracy");
+        const headingDisplay = document.getElementById("heading");
+        const speedDisplay = document.getElementById("speed");
 
-  <canvas id="mapCanvas"></canvas>
-
-  <script>
-    const statusEl = document.getElementById('status');
-    const canvas = document.getElementById('mapCanvas');
-    const ctx = canvas.getContext('2d');
-
-    let watchId;
-    let recordedPoints = [];
-
-    // Resize canvas to full screen
-    function resizeCanvas() {
-      canvas.width = window.innerWidth;
-      canvas.height = window.innerHeight;
-    }
-    window.addEventListener('resize', resizeCanvas);
-    resizeCanvas();
-
-    function drawPoint(x, y, color = "blue", radius = 5) {
-      ctx.beginPath();
-      ctx.arc(x, y, radius, 0, 2 * Math.PI);
-      ctx.fillStyle = color;
-      ctx.fill();
-    }
-
-    // Scale coordinates to fit canvas nicely with padding
-    function scaleCoordinates(coords, width, height, padding = 40) {
-      const lats = coords.map(c => c.latitude);
-      const lons = coords.map(c => c.longitude);
-      const minLat = Math.min(...lats);
-      const maxLat = Math.max(...lats);
-      const minLon = Math.min(...lons);
-      const maxLon = Math.max(...lons);
-
-      const latRange = maxLat - minLat || 0.0001;
-      const lonRange = maxLon - minLon || 0.0001;
-
-      return coords.map(c => ({
-        x: padding + ((c.longitude - minLon) / lonRange) * (width - 2 * padding),
-        y: height - (padding + ((c.latitude - minLat) / latRange) * (height - 2 * padding)) // Y is reversed
-      }));
-    }
-
-    function startMapping() {
-      localStorage.removeItem('mappedCoordinates');
-      recordedPoints = [];
-      statusEl.textContent = "Status: Mapping in progress...";
-
-      if (watchId) navigator.geolocation.clearWatch(watchId);
-
-      watchId = navigator.geolocation.watchPosition(
-        position => {
-          const { latitude, longitude, altitude } = position.coords;
-          const point = { latitude, longitude, altitude: altitude || 0 };
-          recordedPoints.push(point);
-          localStorage.setItem('mappedCoordinates', JSON.stringify(recordedPoints));
-          console.log("Mapped Point:", point);
-        },
-        error => alert("Location error: " + error.message),
-        {
-          enableHighAccuracy: true,
-          timeout: 5000,
-          maximumAge: 0
+        // Mapping variables
+        let isMapping = false;
+        let watchId = null;
+        let orientationId = null;
+        let path = [];
+        let centerPos = null;
+        let currentHeading = null;
+        let currentPos = null;
+        
+        // Map settings
+        const scale = 100000; // Scale factor (pixels per degree)
+        const dotSize = 8;
+        const arrowSize = 20;
+        
+        // Initialize canvas
+        function initCanvas() {
+            ctx.clearRect(0, 0, mapCanvas.width, mapCanvas.height);
+            ctx.fillStyle = "#f8f8f8";
+            ctx.fillRect(0, 0, mapCanvas.width, mapCanvas.height);
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+            ctx.font = "12px Arial";
+            
+            // Draw center marker if we have a center position
+            if (centerPos) {
+                drawPosition(centerPos, "red", "Center");
+            }
         }
-      );
-    }
-
-    function startWalkThrough() {
-      const stored = localStorage.getItem('mappedCoordinates');
-      if (!stored) {
-        alert("No stored path found. Use 'Do Mapping' first.");
-        return;
-      }
-
-      const coords = JSON.parse(stored);
-      if (coords.length < 2) {
-        alert("Insufficient mapped points.");
-        return;
-      }
-
-      statusEl.textContent = "Status: Showing path and live position...";
-      recordedPoints = coords;
-
-      const scaled = scaleCoordinates(coords, canvas.width, canvas.height);
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-      scaled.forEach(p => drawPoint(p.x, p.y, "blue", 4));
-
-      // Track live position and update canvas
-      if (watchId) navigator.geolocation.clearWatch(watchId);
-
-      watchId = navigator.geolocation.watchPosition(
-        position => {
-          const { latitude, longitude } = position.coords;
-
-          const allPoints = [...coords, { latitude, longitude }];
-          const scaledWithLive = scaleCoordinates(allPoints, canvas.width, canvas.height);
-
-          const pathPoints = scaledWithLive.slice(0, -1);
-          const currentPoint = scaledWithLive[scaledWithLive.length - 1];
-
-          ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-          // Draw path
-          pathPoints.forEach(p => drawPoint(p.x, p.y, "blue", 4));
-
-          // Draw current location
-          drawPoint(currentPoint.x, currentPoint.y, "red", 6);
-        },
-        error => alert("Live location error: " + error.message),
-        {
-          enableHighAccuracy: true,
-          timeout: 5000,
-          maximumAge: 0
+        
+        // Convert geographic coordinates to canvas pixels
+        function geoToCanvas(lat, lon) {
+            if (!centerPos) return { x: 0, y: 0 };
+            
+            // Simple equirectangular projection
+            const x = mapCanvas.width/2 + (lon - centerPos.lon) * scale;
+            const y = mapCanvas.height/2 - (lat - centerPos.lat) * scale;
+            
+            return { x, y };
         }
-      );
-    }
-
-    document.getElementById('startMapping').addEventListener('click', () => {
-      if (!navigator.geolocation) {
-        alert("Geolocation not supported.");
-        return;
-      }
-      startMapping();
-    });
-
-    document.getElementById('startWalkThrough').addEventListener('click', () => {
-      if (!navigator.geolocation) {
-        alert("Geolocation not supported.");
-        return;
-      }
-      startWalkThrough();
-    });
-  </script>
+        
+        // Draw a position on the map
+        function drawPosition(pos, color, label = "") {
+            const point = geoToCanvas(pos.lat, pos.lon);
+            
+            // Draw connecting line if this isn't the first point
+            if (path.length > 1 && pos === path[path.length-1]) {
+                const prevPoint = geoToCanvas(path[path.length-2].lat, path[path.length-2].lon);
+                ctx.strokeStyle = "rgba(0, 100, 255, 0.7)";
+                ctx.lineWidth = 3;
+                ctx.beginPath();
+                ctx.moveTo(prevPoint.x, prevPoint.y);
+                ctx.lineTo(point.x, point.y);
+                ctx.stroke();
+            }
+            
+            // Draw position dot
+            ctx.fillStyle = color;
+            ctx.beginPath();
+            ctx.arc(point.x, point.y, dotSize, 0, Math.PI * 2);
+            ctx.fill();
+            
+            // Draw label if provided
+            if (label) {
+                ctx.fillStyle = "#333";
+                ctx.fillText(label, point.x, point.y + dotSize * 2);
+            }
+        }
+        
+        // Draw heading arrow
+        function drawHeading(pos, heading) {
+            if (!heading) return;
+            
+            const point = geoToCanvas(pos.lat, pos.lon);
+            const angle = (360 - heading) * Math.PI / 180; // Convert to radians and adjust for canvas coordinates
+            
+            // Draw arrow line
+            ctx.strokeStyle = "green";
+            ctx.lineWidth = 3;
+            ctx.beginPath();
+            ctx.moveTo(point.x, point.y);
+            ctx.lineTo(
+                point.x + arrowSize * Math.cos(angle),
+                point.y + arrowSize * Math.sin(angle)
+            );
+            ctx.stroke();
+            
+            // Draw arrowhead
+            ctx.fillStyle = "green";
+            ctx.beginPath();
+            ctx.moveTo(
+                point.x + arrowSize * Math.cos(angle),
+                point.y + arrowSize * Math.sin(angle)
+            );
+            ctx.lineTo(
+                point.x + (arrowSize-8) * Math.cos(angle - Math.PI/6),
+                point.y + (arrowSize-8) * Math.sin(angle - Math.PI/6)
+            );
+            ctx.lineTo(
+                point.x + (arrowSize-8) * Math.cos(angle + Math.PI/6),
+                point.y + (arrowSize-8) * Math.sin(angle + Math.PI/6)
+            );
+            ctx.closePath();
+            ctx.fill();
+        }
+        
+        // Handle new position data
+        function handlePosition(position) {
+            if (!isMapping) return;
+            
+            const pos = {
+                lat: position.coords.latitude,
+                lon: position.coords.longitude,
+                accuracy: position.coords.accuracy,
+                speed: position.coords.speed || 0,
+                timestamp: position.timestamp || Date.now()
+            };
+            
+            // Update displays
+            latitudeDisplay.textContent = pos.lat.toFixed(6);
+            longitudeDisplay.textContent = pos.lon.toFixed(6);
+            accuracyDisplay.textContent = `${pos.accuracy.toFixed(1)} meters`;
+            speedDisplay.textContent = pos.speed ? `${(pos.speed * 3.6).toFixed(1)} km/h` : "-";
+            
+            // Set as center if first position
+            if (!centerPos) {
+                centerPos = { lat: pos.lat, lon: pos.lon };
+                statusDiv.textContent = "Mapping started. Begin moving to draw your path.";
+            }
+            
+            // Add to path
+            path.push(pos);
+            currentPos = pos;
+            
+            // Redraw map
+            redrawMap();
+            
+            // Enable center button if we're far from center
+            const canvasPos = geoToCanvas(pos.lat, pos.lon);
+            const distanceFromCenter = Math.sqrt(
+                Math.pow(canvasPos.x - mapCanvas.width/2, 2) + 
+                Math.pow(canvasPos.y - mapCanvas.height/2, 2)
+            );
+            centerBtn.disabled = distanceFromCenter < 50;
+        }
+        
+        // Handle orientation data
+        function handleOrientation(event) {
+            if (!isMapping) return;
+            
+            // Get compass heading (different for iOS vs Android)
+            let heading = null;
+            if (event.webkitCompassHeading) {
+                // iOS
+                heading = event.webkitCompassHeading;
+            } else if (event.absolute && event.alpha !== null) {
+                // Android
+                heading = 360 - event.alpha;
+            }
+            
+            if (heading !== null) {
+                currentHeading = heading;
+                headingDisplay.textContent = `${heading.toFixed(1)}°`;
+                redrawMap();
+            }
+        }
+        
+        // Redraw the entire map
+        function redrawMap() {
+            initCanvas();
+            
+            // Draw all path points
+            path.forEach((pos, index) => {
+                const isCurrent = pos === currentPos;
+                drawPosition(pos, isCurrent ? "green" : "blue");
+            });
+            
+            // Draw current heading if available
+            if (currentPos && currentHeading !== null) {
+                drawHeading(currentPos, currentHeading);
+            }
+        }
+        
+        // Start mapping
+        startBtn.addEventListener("click", () => {
+            if (isMapping) return;
+            
+            // Request location permissions
+            if ("geolocation" in navigator) {
+                isMapping = true;
+                startBtn.disabled = true;
+                stopBtn.disabled = false;
+                centerBtn.disabled = true;
+                exportBtn.disabled = false;
+                statusDiv.textContent = "Getting initial position...";
+                
+                // Start watching position
+                watchId = navigator.geolocation.watchPosition(
+                    handlePosition,
+                    error => {
+                        statusDiv.textContent = `Error: ${error.message}`;
+                        stopMapping();
+                    },
+                    { 
+                        enableHighAccuracy: true,
+                        maximumAge: 0,
+                        timeout: 5000
+                    }
+                );
+                
+                // Start watching orientation
+                if (window.DeviceOrientationEvent) {
+                    if (typeof DeviceOrientationEvent.requestPermission === 'function') {
+                        // iOS 13+ needs permission
+                        DeviceOrientationEvent.requestPermission()
+                            .then(response => {
+                                if (response === 'granted') {
+                                    startOrientationTracking();
+                                } else {
+                                    statusDiv.textContent = "Compass access denied. Direction won't be available.";
+                                }
+                            })
+                            .catch(console.error);
+                    } else {
+                        // Other devices
+                        startOrientationTracking();
+                    }
+                } else {
+                    statusDiv.textContent = "Compass not available. Direction won't be shown.";
+                }
+            } else {
+                statusDiv.textContent = "Geolocation not supported by your browser.";
+            }
+        });
+        
+        function startOrientationTracking() {
+            window.addEventListener("deviceorientation", handleOrientation);
+        }
+        
+        // Stop mapping
+        stopBtn.addEventListener("click", stopMapping);
+        
+        function stopMapping() {
+            if (!isMapping) return;
+            
+            isMapping = false;
+            startBtn.disabled = false;
+            stopBtn.disabled = true;
+            
+            // Clear watchers
+            if (watchId) navigator.geolocation.clearWatch(watchId);
+            window.removeEventListener("deviceorientation", handleOrientation);
+            
+            statusDiv.textContent = `Mapping stopped. Path has ${path.length} points.`;
+        }
+        
+        // Center map on current position
+        centerBtn.addEventListener("click", () => {
+            if (currentPos) {
+                centerPos = { lat: currentPos.lat, lon: currentPos.lon };
+                redrawMap();
+                centerBtn.disabled = true;
+            }
+        });
+        
+        // Export path data
+        exportBtn.addEventListener("click", () => {
+            if (path.length === 0) return;
+            
+            const dataStr = JSON.stringify(path, null, 2);
+            const dataUri = `data:application/json;charset=utf-8,${encodeURIComponent(dataStr)}`;
+            
+            const exportName = `path-${new Date().toISOString().slice(0,10)}.json`;
+            
+            const link = document.createElement("a");
+            link.setAttribute("href", dataUri);
+            link.setAttribute("download", exportName);
+            link.click();
+            
+            statusDiv.textContent = `Path exported with ${path.length} points`;
+        });
+        
+        // Initialize
+        initCanvas();
+    </script>
 </body>
 </html>
